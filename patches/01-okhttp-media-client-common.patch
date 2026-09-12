@@ -1,0 +1,25 @@
+diff --git a/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/exoplayer/ExoMediaSourceFactory.java b/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/exoplayer/ExoMediaSourceFactory.java
+index e47dfec..145dcf6 100644
+--- a/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/exoplayer/ExoMediaSourceFactory.java
++++ b/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/exoplayer/ExoMediaSourceFactory.java
+@@ -275,7 +275,10 @@ public class ExoMediaSourceFactory {
+      * Use OkHttp for networking
+      */
+     private HttpDataSource.Factory buildOkHttpDataSourceFactory(DefaultBandwidthMeter bandwidthMeter) {
+-        OkHttpDataSourceFactory dataSourceFactory = new OkHttpDataSourceFactory(OkHttpManager.instance().getClient(), USER_AGENT,
++        // NOTE: Use the streaming-optimized client (HTTP/2 multiplexing + long-lived connections).
++        // This keeps all segment/range requests on one stable connection to the proxy,
++        // preventing Cloudflare Workers/Pages IP-hopping from stalling playback.
++        OkHttpDataSourceFactory dataSourceFactory = new OkHttpDataSourceFactory(OkHttpManager.instance().getMediaClient(), USER_AGENT,
+                 bandwidthMeter);
+         addCommonHeaders(dataSourceFactory);
+         return dataSourceFactory;
+@@ -302,7 +305,7 @@ public class ExoMediaSourceFactory {
+     private HttpDataSource.Factory buildDefaultHttpDataSourceFactory(DefaultBandwidthMeter bandwidthMeter) {
+         DefaultHttpDataSourceFactory dataSourceFactory = new DefaultHttpDataSourceFactory(
+                 USER_AGENT, bandwidthMeter, (int) OkHttpManager.getConnectTimeoutMs(),
+-                (int) OkHttpManager.getReadTimeoutMs(), true); // allowCrossProtocolRedirects = true
++                (int) OkHttpManager.getMediaReadTimeoutMs(), true); // allowCrossProtocolRedirects = true
+ 
+         addCommonHeaders(dataSourceFactory); // cause troubles for some users
+         return dataSourceFactory;

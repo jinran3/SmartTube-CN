@@ -30,6 +30,15 @@ public class DashDefaultLoadErrorHandlingPolicy extends DefaultLoadErrorHandling
      */
     @Override
     public long getRetryDelayMsFor(int dataType, long loadDurationMs, IOException exception, int errorCount) {
+        if (exception instanceof InvalidResponseCodeException) {
+            int responseCode = ((InvalidResponseCodeException) exception).responseCode;
+            if (responseCode == 403) {
+                // 403 = stream url rejected because the proxy exit IP changed (IP-bound url).
+                // The url is dead - don't retry it, fail fast so ErrorFixerController loads fresh urls.
+                return C.TIME_UNSET;
+            }
+        }
+
         return exception instanceof ParserException
                 || exception instanceof FileNotFoundException
                 || exception instanceof UnexpectedLoaderException

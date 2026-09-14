@@ -1,0 +1,212 @@
+# SmartTube-CN: track upstream yuliskov/smarttube and release adapted builds.
+# Docs: docs/SYNC_GUIDE.md
+name: Sync & Release
+
+on:
+  schedule:
+    # Every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rebuild even if upstream is unchanged'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-release
+  cancel-in-progress: true
+
+jobs:
+  sync-build-release:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_URL: https://github.com/yuliskov/smarttube.git
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "smarttube-cn-bot"
+          git config user.email "smarttube-cn-bot@users.noreply.github.com"
+
+      - name: Fetch upstream master
+        run: |
+          git fetch --no-tags "$UPSTREAM_URL" master:refs/remotes/upstream/master
+
+      - name: Check whether upstream moved
+        id: sync_check
+        run: |
+          UPSTREAM_SHA="$(git rev-parse refs/remotes/upstream/master)"
+          echo "UPSTREAM_SHA=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+          LAST="$(git show origin/main:LAST_SYNC 2>/dev/null || true)"
+          echo "last_synced=${LAST}"
+          FORCE="${{ inputs.force == true }}"
+          echo "force=${FORCE}"
+          if [ "${FORCE}" != "true" ] && [ -n "${LAST}" ] && [ "${LAST}" = "${UPSTREAM_SHA}" ] \
+             && git ls-remote --exit-code --tags origin "refs/tags/v*-cn-*" >/dev/null 2>&1; then
+            echo "Upstream already synced at ${UPSTREAM_SHA} and a -cn release exists. Nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase onto pristine upstream + restore fork files
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          echo "SYNC_DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
+          # Start from clean upstream code
+          git checkout -B sync-build refs/remotes/upstream/master
+          # Restore fork-only files from main (our patches, docs, workflow)
+          git checkout origin/main -- .github patches docs README.md README_zh-CN.md CHANGELOG.md LICENSE LAST_SYNC
+          git reset          # unstage, keep working tree identical to upstream+meta
+          git submodule update --init --recursive
+
+      - name: Apply SmartTube-CN patches
+        if: steps.sync_check.outputs.skip != 'true'
+        run: bash patches/apply.sh
+
+      - name: Point in-app update source at this fork
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          # The built-in updater reads update_urls.xml; point it at THIS repo's releases.
+          sed -i "s|GITHUB_REPOSITORY|${{ github.repository }}|g" \
+            common/src/ststable/res/values/update_urls.xml \
+            common/src/stbeta/res/values/update_urls.xml
+          grep -h 'item>' common/src/ststable/res/values/update_urls.xml common/src/stbeta/res/values/update_urls.xml
+
+      - name: Stamp version and commit sync
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          UPSTREAM_SHA="${{ steps.sync_check.outputs.UPSTREAM_SHA }}"
+          RUN_NUM="${{ github.run_number }}"
+          # Keep the fork builds distinguishable from official ones.
+          # Bump versionCode (base + run number) so the in-app updater ALWAYS sees
+          # a higher versionCode than the official / previously installed build.
+          BASE_VC="$(grep 'versionCode' smarttubetv/build.gradle | head -n 1 | grep -oE '[0-9]+' | head -n 1)"
+          sed -i -E "s/versionCode[[:space:]]+[0-9]+/versionCode $((BASE_VC + RUN_NUM))/" smarttubetv/build.gradle
+          # Append -cn-<date>-r<run> so each sync gets a unique versionName/tag
+          sed -i -E "s/versionName \"([0-9.]+)\"/versionName \"\1-cn-${{ env.SYNC_DATE }}-r${RUN_NUM}\"/" smarttubetv/build.gradle
+          git add -A
+          git commit -m "Sync with upstream ${UPSTREAM_SHA:0:7} and apply SmartTube-CN patches (${{ env.SYNC_DATE }})"
+          git push --force origin sync-build:main
+
+      - name: Set up JDK 17
+        if: steps.sync_check.outputs.skip != 'true'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        if: steps.sync_check.outputs.skip != 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;30.0.3" >/dev/null
+
+      - name: Prepare stable signing keystore
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          # Use the SAME key for every build so in-app upgrades install cleanly
+          # (Gradle debug buildType signs with signingConfig.release when the
+          # keystore.properties file is present).
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/smarttube-cn.keystore"
+          cat > keystore.properties <<EOF
+          storeFile=$RUNNER_TEMP/smarttube-cn.keystore
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+
+      - name: Build Stable Debug APKs (all ABIs)
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew :smarttubetv:assembleStstableDebug --console=plain --no-daemon
+
+      - name: Upload APK artifacts
+        if: steps.sync_check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smarttube-cn-apks
+          path: smarttubetv/build/outputs/apk/ststable/debug/*.apk
+          if-no-files-found: error
+
+      - name: Compute release info
+        id: release_info
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          VERSION="$(grep 'versionName' smarttubetv/build.gradle | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "TAG=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate in-app update manifest
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          APK_DIR="smarttubetv/build/outputs/apk/ststable/debug"
+          REPO="${{ github.repository }}"
+          BASE="https://github.com/${REPO}/releases/latest/download"
+          DATE="${{ env.SYNC_DATE }}"
+          UP_SHA="${{ steps.sync_check.outputs.UPSTREAM_SHA }}"
+          VERSION="${{ steps.release_info.outputs.VERSION }}"
+          VERSION_CODE="$(grep 'versionCode' smarttubetv/build.gradle | head -n 1 | sed -E 's/.*versionCode[[:space:]]+([0-9]+).*/\1/')"
+          CHANGELOG="同步官方 ${UP_SHA:0:7}；修复 CF Workers/Pages 代理断流(403)，新增 OkHttp 流媒体客户端、中文调试面板(HDR/杜比视界)。构建日期 ${DATE}"
+
+          v7a="$(basename "$(ls "$APK_DIR"/*armeabi-v7a.apk 2>/dev/null | head -n1)")"
+          v8a="$(basename "$(ls "$APK_DIR"/*arm64-v8a.apk 2>/dev/null | head -n1)")"
+          x86="$(basename "$(ls "$APK_DIR"/*x86.apk 2>/dev/null | head -n1)")"
+          uni="$(basename "$(ls "$APK_DIR"/*universal.apk 2>/dev/null | head -n1)")"
+
+          jq -n \
+            --arg base "$BASE" --arg version "$VERSION" --arg vc "$VERSION_CODE" --arg log "$CHANGELOG" \
+            --arg v7a "$v7a" --arg v8a "$v8a" --arg x86 "$x86" --arg uni "$uni" \
+            '{ "package": {
+                 "downloadUrlList": [($base + "/" + $uni)],
+                 "downloadUrlList_armeabi-v7a": [($base + "/" + $v7a)],
+                 "downloadUrlList_arm64-v8a": [($base + "/" + $v8a)],
+                 "downloadUrlList_x86": [($base + "/" + $x86)]
+               },
+               ($version): { "versionCode": ($vc | tonumber), "changelog": [$log], "changelog_zh": [$log] } }' \
+            > smarttube_stable2.json
+          echo "Generated smarttube_stable2.json:" && cat smarttube_stable2.json
+
+      - name: Publish GitHub Release
+        if: steps.sync_check.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.release_info.outputs.TAG }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists, skipping release creation."
+          else
+            gh release create "${TAG}" smarttubetv/build/outputs/apk/ststable/debug/*.apk smarttube_stable2.json \
+              --title "SmartTube-CN ${{ steps.release_info.outputs.VERSION }}" \
+              --notes "Synced with upstream ${{ steps.sync_check.outputs.UPSTREAM_SHA }}. See CHANGELOG.md for details." \
+              --repo "${{ github.repository }}"
+          fi
+
+      - name: Mark synced upstream
+        if: steps.sync_check.outputs.skip != 'true'
+        run: |
+          UPSTREAM_SHA="${{ steps.sync_check.outputs.UPSTREAM_SHA }}"
+          echo "${UPSTREAM_SHA}" > LAST_SYNC
+          if ! git diff --quiet LAST_SYNC; then
+            git add LAST_SYNC
+            git commit -m "chore: mark synced upstream ${UPSTREAM_SHA}"
+            git push --force origin sync-build:main
+          else
+            echo "LAST_SYNC already at ${UPSTREAM_SHA}; nothing to commit."
+          fi

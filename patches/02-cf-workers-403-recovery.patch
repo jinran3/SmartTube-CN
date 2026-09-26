@@ -1,0 +1,113 @@
+diff --git a/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/app/models/playback/controllers/ErrorFixerController.java b/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/app/models/playback/controllers/ErrorFixerController.java
+index c58f10b..991160f 100644
+--- a/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/app/models/playback/controllers/ErrorFixerController.java
++++ b/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/app/models/playback/controllers/ErrorFixerController.java
+@@ -1,6 +1,7 @@
+ package com.liskovsoft.smartyoutubetv2.common.app.models.playback.controllers;
+ 
+ import android.annotation.SuppressLint;
++import android.text.TextUtils;
+ 
+ import com.liskovsoft.sharedutils.helpers.Helpers;
+ import com.liskovsoft.sharedutils.helpers.MessageHelpers;
+@@ -22,8 +23,12 @@ import java.util.List;
+ public class ErrorFixerController extends BasePlayerController implements OnLongBuffering {
+     private static final String TAG = ErrorFixerController.class.getSimpleName();
+     private static final long STREAM_END_THRESHOLD_MS = 180_000;
++    // How many times we reload the same video on 403 before switching the client.
++    private static final int MAX_403_RELOADS = 2;
+     private final BufferingDetector mBufferingDetector = new BufferingDetector(this);
+     private VideoLoaderController mVideoLoaderController;
++    private String mForbidden403VideoId;
++    private int mForbidden403Count;
+ 
+     @Override
+     public void onInit() {
+@@ -50,11 +55,10 @@ public class ErrorFixerController extends BasePlayerController implements OnLong
+             disableSubtitles();
+             mVideoLoaderController.reloadVideo();
+         } else if (!mBufferingDetector.isPlayable()) {
+-            if (getPlayerTweaksData().getPlayerDataSource() != PlayerTweaksData.PLAYER_DATA_SOURCE_OKHTTP
+-                && getPlayerTweaksData().getPreferredDnsType() != PlayerTweaksData.DNS_TYPE_SYSTEM
+-                && !getPlayerTweaksData().isNetworkErrorFixingDisabled()) {
+-                // Wrong DNS resolving could cause hanging at start
+-                // Do switch to only engine that respects custom DNS settings
++            if (getPlayerTweaksData().getPlayerDataSource() != PlayerTweaksData.PLAYER_DATA_SOURCE_OKHTTP) {
++                // OkHttp engine now uses a streaming-optimized client (HTTP/2 multiplexing,
++                // long-lived connections). It fixes stalling caused by Cloudflare Workers/Pages
++                // proxies where each new connection may get a different exit IP.
+                 MessageHelpers.showLongMessage(getContext(), "Fixing wrong DNS resolving...");
+                 getPlayerTweaksData().setPlayerDataSource(PlayerTweaksData.PLAYER_DATA_SOURCE_OKHTTP);
+                 mVideoLoaderController.restartEngine();
+@@ -91,6 +95,7 @@ public class ErrorFixerController extends BasePlayerController implements OnLong
+     @Override
+     public void onPlay() {
+         mBufferingDetector.onStopBuffering();
++        mForbidden403Count = 0; // playback resumed, the stream works again
+     }
+ 
+     @Override
+@@ -101,6 +106,14 @@ public class ErrorFixerController extends BasePlayerController implements OnLong
+     @Override
+     public void onNewVideo(Video item) {
+         mBufferingDetector.start();
++
++        // Reset the 403 counter only when a *different* video starts loading.
++        // A same-video reload (fresh stream urls) must keep counting consecutive failures.
++        String videoId = item != null ? item.videoId : null;
++        if (!TextUtils.equals(videoId, mForbidden403VideoId)) {
++            mForbidden403VideoId = videoId;
++            mForbidden403Count = 0;
++        }
+     }
+ 
+     @Override
+@@ -189,8 +202,27 @@ public class ErrorFixerController extends BasePlayerController implements OnLong
+             restartEngine = false;
+             showMessage = false;
+ 
++            boolean isForbidden = Helpers.startsWithAny(errorContent, "Response code: 403");
+             boolean isGeneralError = Helpers.startsWithAny(errorContent, "Response code: 429", "Response code: 500");
+-            if (isGeneralError && isSubtitlesEnabled()) {
++
++            if (isForbidden) {
++                // Response code: 403 (forbidden)
++                // Cloudflare Workers/Pages (edgetunnel) proxies may exit through different Cloudflare
++                // IPs per request. Googlevideo stream urls are IP-bound, so when the proxy exit IP
++                // changes mid-play the old url dies with 403. Retrying the same url can't help:
++                // invalidate the format info cache and re-fetch fresh stream urls. Escalate to a
++                // client switch only if the same video keeps failing.
++                if (mForbidden403Count < MAX_403_RELOADS) {
++                    mForbidden403Count++;
++                    showMessage = false;
++                    YouTubeServiceManager.instance().invalidateCache(); // force fresh stream urls
++                    mVideoLoaderController.reloadVideo();
++                    return;
++                }
++                mForbidden403Count = 0;
++                YouTubeServiceManager.instance().switchNextClientNow(); // fallback
++                showMessage = true;
++            } else if (isGeneralError && isSubtitlesEnabled()) {
+                 disableSubtitles(); // Response code: 429
+             } else if (isGeneralError && getPlayerTweaksData().isHighBitrateFormatsEnabled()) {
+                 getPlayerTweaksData().setHighBitrateFormatsEnabled(false); // Response code: 429
+diff --git a/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/exoplayer/errors/DashDefaultLoadErrorHandlingPolicy.java b/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/exoplayer/errors/DashDefaultLoadErrorHandlingPolicy.java
+index 93bd563..8b17d62 100644
+--- a/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/exoplayer/errors/DashDefaultLoadErrorHandlingPolicy.java
++++ b/common/src/main/java/com/liskovsoft/smartyoutubetv2/common/exoplayer/errors/DashDefaultLoadErrorHandlingPolicy.java
+@@ -30,6 +30,15 @@ public class DashDefaultLoadErrorHandlingPolicy extends DefaultLoadErrorHandling
+      */
+     @Override
+     public long getRetryDelayMsFor(int dataType, long loadDurationMs, IOException exception, int errorCount) {
++        if (exception instanceof InvalidResponseCodeException) {
++            int responseCode = ((InvalidResponseCodeException) exception).responseCode;
++            if (responseCode == 403) {
++                // 403 = stream url rejected because the proxy exit IP changed (IP-bound url).
++                // The url is dead - don't retry it, fail fast so ErrorFixerController loads fresh urls.
++                return C.TIME_UNSET;
++            }
++        }
++
+         return exception instanceof ParserException
+                 || exception instanceof FileNotFoundException
+                 || exception instanceof UnexpectedLoaderException

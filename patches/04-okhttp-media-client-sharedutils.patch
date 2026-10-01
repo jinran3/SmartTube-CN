@@ -1,0 +1,104 @@
+diff --git a/sharedutils/src/main/java/com/liskovsoft/sharedutils/okhttp/OkHttpCommons.java b/sharedutils/src/main/java/com/liskovsoft/sharedutils/okhttp/OkHttpCommons.java
+index 60f338b..dc10686 100644
+--- a/sharedutils/src/main/java/com/liskovsoft/sharedutils/okhttp/OkHttpCommons.java
++++ b/sharedutils/src/main/java/com/liskovsoft/sharedutils/okhttp/OkHttpCommons.java
+@@ -43,6 +43,11 @@ final class OkHttpCommons {
+     public static final long CONNECT_TIMEOUT_MS = 20_000;
+     public static final long READ_TIMEOUT_MS = 20_000;
+     public static final long WRITE_TIMEOUT_MS = 20_000;
++    // Media/streaming client uses longer read timeouts to survive transient
++    // Cloudflare Workers/Pages proxy hiccups (cold starts, per-request egress changes).
++    public static final long MEDIA_CONNECT_TIMEOUT_MS = 20_000;
++    public static final long MEDIA_READ_TIMEOUT_MS = 60_000;
++    public static final long MEDIA_WRITE_TIMEOUT_MS = 60_000;
+     public static boolean enableProfiler = true;
+ 
+     private OkHttpCommons() {
+@@ -103,6 +108,38 @@ final class OkHttpCommons {
+         //okBuilder.connectionPool(new ConnectionPool(10, 24, TimeUnit.HOURS)); // Video unavailable fix???
+         okBuilder.connectionPool(new ConnectionPool(20, 5, TimeUnit.MINUTES)); // fix npe on pool dispose???
+     }
++    /**
++     * Streaming-optimized client builder for media (video/audio) downloads.<br/>
++     * <br/>
++     * Why HTTP/2: when SmartTube plays through a Cloudflare Workers/Pages proxy (e.g. edgetunnel),
++     * every new TCP connection may be served from a different CF edge/exit IP. Googlevideo then
++     * sees the same stream URL coming from many different IPs and starts throttling/resetting it,
++     * which looks like constant buffering (stalling) on the TV while phone/PC clients (HTTP/2/QUIC,
++     * multiplexed over one connection) play fine. Allowing HTTP/2 (with HTTP/1.1 fallback) lets
++     * ExoPlayer's parallel range/segment requests share a single long-lived connection to the
++     * proxy, keeping the exit IP stable. The long-lived connection pool makes subsequent Range
++     * requests reuse the same connection instead of hopping between egresses.
++     */
++    static OkHttpClient.Builder setupMediaBuilder(OkHttpClient.Builder okBuilder) {
++        okBuilder.connectTimeout(MEDIA_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
++        okBuilder.readTimeout(MEDIA_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS);
++        okBuilder.writeTimeout(MEDIA_WRITE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
++
++        // Keep connections alive long enough to cover an entire video.
++        okBuilder.connectionPool(new ConnectionPool(8, 30, TimeUnit.MINUTES));
++        okBuilder.retryOnConnectionFailure(true);
++
++        // HTTP/2 multiplexing over a single connection (fallback to HTTP/1.1).
++        okBuilder.protocols(Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1));
++
++        setupConnectionFix(okBuilder);
++        preferIPv4Dns(okBuilder);
++        configureToIgnoreCertificate(okBuilder);
++        enableDecompression(okBuilder);
++
++        return okBuilder;
++    }
++
+ 
+     /**
+      * Fixing SSL handshake timed out (probably provider issues in some countries)
+diff --git a/sharedutils/src/main/java/com/liskovsoft/sharedutils/okhttp/OkHttpManager.java b/sharedutils/src/main/java/com/liskovsoft/sharedutils/okhttp/OkHttpManager.java
+index 7bae6b6..a3d8a3e 100644
+--- a/sharedutils/src/main/java/com/liskovsoft/sharedutils/okhttp/OkHttpManager.java
++++ b/sharedutils/src/main/java/com/liskovsoft/sharedutils/okhttp/OkHttpManager.java
+@@ -18,6 +18,7 @@ public class OkHttpManager {
+     private static final String TAG = OkHttpManager.class.getSimpleName();
+     private static OkHttpManager sInstance;
+     private OkHttpClient mClient;
++    private OkHttpClient mMediaClient;
+     private final boolean mEnableProfiler;
+ 
+     private OkHttpManager(boolean enableProfiler) {
+@@ -40,6 +41,22 @@ public class OkHttpManager {
+         sInstance = null;
+     }
+ 
++    /**
++     * Streaming-optimized client for media (video/audio) downloads.<br/>
++     * Uses HTTP/2 multiplexing and a long-lived connection pool, which keeps
++     * all segment/range requests on one stable connection. This avoids the
++     * Cloudflare Workers/Pages proxy IP-hopping that makes Googlevideo
++     * throttle/reset streams (observed as constant buffering on TV).
++     */
++    public OkHttpClient getMediaClient() {
++        if (mMediaClient == null) {
++            OkHttpCommons.enableProfiler = mEnableProfiler;
++            mMediaClient = OkHttpCommons.setupMediaBuilder(new OkHttpClient.Builder()).build();
++        }
++
++        return mMediaClient;
++    }
++
+     public Response doRequest(String url) {
+         return doRequest(url, getClient());
+     }
+@@ -163,6 +180,13 @@ public class OkHttpManager {
+     public static long getReadTimeoutMs() {
+         return OkHttpCommons.READ_TIMEOUT_MS;
+     }
++
++    /**
++     * More forgiving read timeout for media streams (survive transient proxy hiccups).
++     */
++    public static long getMediaReadTimeoutMs() {
++        return OkHttpCommons.MEDIA_READ_TIMEOUT_MS;
++    }
+     
+     public static long getWriteTimeoutMs() {
+         return OkHttpCommons.WRITE_TIMEOUT_MS;

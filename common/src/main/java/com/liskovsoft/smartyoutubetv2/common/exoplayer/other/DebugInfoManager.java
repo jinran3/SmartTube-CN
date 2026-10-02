@@ -60,7 +60,7 @@ import java.util.Locale;
 public final class DebugInfoManager implements Runnable, Player.EventListener {
     private static final String TAG = DebugInfoManager.class.getSimpleName();
     private static final int REFRESH_INTERVAL_MS = 1000;
-    private static final String NOT_AVAILABLE = "none";
+    private static final String NOT_AVAILABLE = "无";
     private final float mTextSize;
 
     private final SimpleExoPlayer mPlayer;
@@ -88,7 +88,7 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
         mPlayer = player;
         mPlayerInitializer = playerInitializer;
         mTextSize = mContext.getResources().getDimension(R.dimen.debug_text_size);
-        mAppVersion = String.format("%s version", mContext.getString(R.string.app_name));
+        mAppVersion = String.format("%s 版本", mContext.getString(R.string.app_name));
         inflate();
     }
 
@@ -243,17 +243,17 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
             return;
         }
 
-        String videoRes = getVideoResolution(video);
+        String videoRes = getVideoResolution(video) + getHdrTag(video);
 
-        mVideoInfo.add(new Pair<>("Video resolution", videoRes));
-        mVideoInfo.add(new Pair<>("Video/Audio codecs", String.format(
+        mVideoInfo.add(new Pair<>("视频分辨率", videoRes));
+        mVideoInfo.add(new Pair<>("视频/音频编码", String.format(
                 "%s(%s)/%s(%s)",
                 getFormatMimeType(video),
                 getFormatId(video),
                 getFormatMimeType(audio),
                 getFormatId(audio)
         )));
-        mVideoInfo.add(new Pair<>("Video/Audio bitrate", String.format(
+        mVideoInfo.add(new Pair<>("视频/音频码率", String.format(
                 "%s/%s",
                 toHumanReadable(video.bitrate),
                 toHumanReadable(audio.bitrate)
@@ -264,7 +264,7 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
         //        DEFAULT : String.format(Locale.US, "%.02f", video.pixelWidthHeightRatio);
         //mVideoInfo.add(new Pair<>("Aspect Ratio", par));
         String videoCodecName = getVideoDecoderNameV2();
-        mVideoInfo.add(new Pair<>("Video decoder name", videoCodecName));
+        mVideoInfo.add(new Pair<>("视频解码器", videoCodecName));
         //mVideoInfo.add(new Pair<>("Hardware accelerated", String.valueOf(DeviceHelpers.isHardwareAccelerated(videoCodecName))));
         
         if (video.colorInfo != null) {
@@ -279,9 +279,13 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
 
             String transferFunction = getColorTransferString(video.colorInfo.colorTransfer);
             String colorSpace = getColorSpaceString(video.colorInfo.colorSpace);
-            String colorRange = getColorRangeString(video.colorInfo.hdrStaticInfo);
+            String colorRange = getColorRangeString(video.colorInfo.colorRange);
+            String hdri = getHdriString(video.colorInfo.hdrStaticInfo);
 
-            mVideoInfo.add(new Pair<>("Transfer/Space/Range", transferFunction + "/" + colorSpace + "/" + colorRange));
+            // HDR 信息（含杜比视界）
+            mVideoInfo.add(new Pair<>("HDR类型(DV)", getHdrTypeString(video)));
+            mVideoInfo.add(new Pair<>("传输/空间/范围", transferFunction + "/" + colorSpace + "/" + hdri));
+            mVideoInfo.add(new Pair<>("色彩范围", colorRange));
         }
     }
 
@@ -291,8 +295,8 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
             return;
 
         counters.ensureUpdated();
-        appendRow("Dropped/Rendered frames", counters.droppedBufferCount + "/" + counters.renderedOutputBufferCount);
-        appendRow("Buffer size (seconds)", (int)(mPlayer.getBufferedPosition() - mPlayer.getCurrentPosition()) / 1_000);
+        appendRow("丢帧/已渲染帧", counters.droppedBufferCount + "/" + counters.renderedOutputBufferCount);
+        appendRow("缓冲时长(秒)", (int)(mPlayer.getBufferedPosition() - mPlayer.getCurrentPosition()) / 1_000);
     }
 
     private void appendPlayerState() {
@@ -301,26 +305,26 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
         String state;
         switch (mPlayer.getPlaybackState()) {
             case Player.STATE_BUFFERING:
-                state = "buffering";
+                state = "缓冲中";
                 break;
             case Player.STATE_ENDED:
-                state = "ended";
+                state = "已结束";
                 break;
             case Player.STATE_IDLE:
-                state = "idle";
+                state = "空闲";
                 break;
             case Player.STATE_READY:
-                state = "ready";
+                state = "就绪";
                 break;
             default:
-                state = "unknown";
+                state = "未知";
                 break;
         }
         //appendRow("Playback state", state);
         float boost = mPlayerInitializer.getVolumeBoost();
-        appendRow("Playback info", String.format("paused=%s;state=%s", !mPlayer.getPlayWhenReady(), state));
-        appendRow("Volume",
-                String.format("original=%s;normalized=%s", PlayerData.instance(mContext).getPlayerVolume(), Helpers.formatFloat(boost * mPlayer.getVolume())));
+        appendRow("播放信息", String.format("暂停=%s;状态=%s", !mPlayer.getPlayWhenReady() ? "是" : "否", state));
+        appendRow("音量",
+                String.format("原始=%s;标准化=%s", PlayerData.instance(mContext).getPlayerVolume(), Helpers.formatFloat(boost * mPlayer.getVolume())));
     }
 
     private void appendDisplayModeId() {
@@ -342,14 +346,14 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
         String bootResolution = AppPrefs.instance(mContext).getBootResolution();
         String currentResolution = UhdHelper.toResolution(currentMode);
 
-        mDisplayModeId.add(new Pair<>("UI resolution", currentResolution != null ? currentResolution : NOT_AVAILABLE));
-        mDisplayModeId.add(new Pair<>("Boot resolution", bootResolution != null ? bootResolution : NOT_AVAILABLE));
+        mDisplayModeId.add(new Pair<>("界面分辨率", currentResolution != null ? currentResolution : NOT_AVAILABLE));
+        mDisplayModeId.add(new Pair<>("开机分辨率", bootResolution != null ? bootResolution : NOT_AVAILABLE));
 
         //mDisplayModeId.add(new Pair<>("Display mode ID", currentMode != null ? String.valueOf(currentMode.getModeId()) : NOT_AVAILABLE));
         //mDisplayModeId.add(new Pair<>("Display modes length", supportedModes != null ? String.valueOf(supportedModes.length) : NOT_AVAILABLE));
         String modeId = currentMode != null ? String.valueOf(currentMode.getModeId()) : NOT_AVAILABLE;
         String modeLength = supportedModes != null ? String.valueOf(supportedModes.length) : NOT_AVAILABLE;
-        mDisplayModeId.add(new Pair<>("Display mode (ID/Length)", modeId + "/" + modeLength));
+        mDisplayModeId.add(new Pair<>("显示模式(ID/数量)", modeId + "/" + modeLength));
     }
 
     private void appendDisplayInfo() {
@@ -361,11 +365,11 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
     private void updateDisplayInfo() {
         mDisplayInfo.clear();
 
-        mDisplayInfo.add(new Pair<>("Display DPI", String.valueOf(Helpers.getDeviceDpi(mContext))));
+        mDisplayInfo.add(new Pair<>("屏幕DPI", String.valueOf(Helpers.getDeviceDpi(mContext))));
     }
 
     private void appendPlayerWindowIndex() {
-        appendRow("Window index", mPlayer.getCurrentWindowIndex());
+        appendRow("窗口索引", mPlayer.getCurrentWindowIndex());
     }
 
     private void appendVersion() {
@@ -373,7 +377,7 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
         PlayerTweaksData playerTweaksData = PlayerTweaksData.instance(mContext);
         String engine = playerTweaksData.getPlayerDataSource() == PlayerTweaksData.PLAYER_DATA_SOURCE_OKHTTP ? "OkHttp" :
                 playerTweaksData.getPlayerDataSource() == PlayerTweaksData.PLAYER_DATA_SOURCE_CRONET
-                        && CronetManager.getEngine(mContext) != null ? "Cronet" : "Default";
+                        && CronetManager.getEngine(mContext) != null ? "Cronet" : "默认";
         String protocol;
         Object manifest = mPlayer.getCurrentManifest();
         if (manifest == null) {
@@ -385,16 +389,16 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
         } else {
             protocol = "HLS";
         }
-        appendRow("ExoPlayer", "engine=" + engine + ";protocol=" + protocol);
+        appendRow("播放器引擎", "引擎=" + engine + ";协议=" + protocol);
         //appendRow("Cronet version", ApiVersion.getCronetVersion());
         //appendRow("OkHttp version", Version.userAgent());
         appendRow(mAppVersion, AppInfoHelpers.getAppVersionName(mContext));
     }
 
     private void appendDeviceNameSDKCache() {
-        appendRow("Device name", Helpers.getDeviceName());
-        appendRow("Android SDK", VERSION.SDK_INT);
-        appendRow("Disk cache size (MB)", String.valueOf(
+        appendRow("设备名称", Helpers.getDeviceName());
+        appendRow("安卓版本", VERSION.SDK_INT);
+        appendRow("磁盘缓存(MB)", String.valueOf(
                 (FileHelpers.getDirSize(FileHelpers.getCacheDir(mContext)) + FileHelpers.getDirSize(FileHelpers.getExternalCacheDir(mContext)))
                         / 1024 / 1024
         ));
@@ -403,7 +407,7 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
     private void appendMemoryInfo() {
         //appendRow("Max heap memory (MB)", DeviceHelpers.getMaxHeapMemoryMB()); // Growth Limit
         //appendRow("Allocated heap memory (MB)", DeviceHelpers.getAllocatedHeapMemoryMB());
-        appendRow("Memory (Alloc/Max, MB)", DeviceHelpers.getAllocatedHeapMemoryMB() + "/" + DeviceHelpers.getMaxHeapMemoryMB());
+        appendRow("内存(已分配/上限, MB)", DeviceHelpers.getAllocatedHeapMemoryMB() + "/" + DeviceHelpers.getMaxHeapMemoryMB());
     }
 
     private void appendWebViewInfo() {
@@ -430,7 +434,7 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
             shortPlayerUrl = shortPlayerUrl != null ? shortPlayerUrl.split("/")[1] : null;
             CharSequence coloredVersion = isFailed ? Utils.color(playerVersion, Color.RED) : playerVersion;
             CharSequence coloredType = isFailed ? Utils.color(shortPlayerUrl, Color.RED) : shortPlayerUrl;
-            appendRow("Web player (Version/Type)", TextUtils.concat(coloredVersion, "/", coloredType));
+            appendRow("网页播放器(版本/类型)", TextUtils.concat(coloredVersion, "/", coloredType));
         }
     }
 
@@ -439,11 +443,11 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
         //CharSequence playerVersion = getPlayerVersion();
         boolean potSupported = MediaServiceData.instance().isPotSupported();
 
-        appendRow("Web info", "client=" + clientType + ";pot=" + potSupported);
+        appendRow("网页信息", "客户端=" + clientType + ";poToken=" + potSupported);
     }
 
     private void appendAccountInfo() {
-        appendRow("Account info", MediaServiceManager.instance().printAccountDebugInfo());
+        appendRow("账号信息", MediaServiceManager.instance().printAccountDebugInfo());
     }
 
     private void appendRow(String name, boolean val) {
@@ -569,8 +573,87 @@ public final class DebugInfoManager implements Runnable, Player.EventListener {
         }
     }
 
-    private String getColorRangeString(byte[] hdrInfo) {
-        return hdrInfo != null ? "HDR" : "SDR";
+    /**
+     * 视频色彩范围（全/有限）
+     */
+    private String getColorRangeString(int colorRange) {
+        if (colorRange == Format.NO_VALUE) {
+            return NOT_AVAILABLE;
+        }
+
+        return colorRange == C.COLOR_RANGE_FULL ? "全范围(Full)" : "有限范围(Limited)";
+    }
+
+    /**
+     * 是否带静态 HDR 元数据
+     */
+    private String getHdriString(byte[] hdrStaticInfo) {
+        return hdrStaticInfo != null ? "HDR" : "SDR";
+    }
+
+    /**
+     * 当前视频的 HDR 类型（含杜比视界）
+     */
+    private String getHdrTypeString(Format video) {
+        if (video == null) {
+            return NOT_AVAILABLE;
+        }
+
+        if (isDolbyVision(video)) {
+            return "杜比视界 (Dolby Vision)";
+        }
+
+        if (video.colorInfo == null) {
+            return NOT_AVAILABLE;
+        }
+
+        switch (video.colorInfo.colorTransfer) {
+            case C.COLOR_TRANSFER_ST2084:
+                return "HDR10";
+            case C.COLOR_TRANSFER_HLG:
+                return "HLG";
+            case C.COLOR_TRANSFER_SDR:
+                return "SDR";
+            default:
+                return NOT_AVAILABLE;
+        }
+    }
+
+    /**
+     * 分辨率后的 HDR 简短标记，例如 (HDR10)、(DV)、(HLG)
+     */
+    private String getHdrTag(Format video) {
+        if (video == null) {
+            return "";
+        }
+
+        if (isDolbyVision(video)) {
+            return " (DV)";
+        }
+
+        if (video.colorInfo != null) {
+            switch (video.colorInfo.colorTransfer) {
+                case C.COLOR_TRANSFER_ST2084:
+                    return " (HDR10)";
+                case C.COLOR_TRANSFER_HLG:
+                    return " (HLG)";
+                default:
+                    return "";
+            }
+        }
+
+        return "";
+    }
+
+    /**
+     * 杜比视界检测：YouTube DV 流的 codecs 形如 dvhe.04.06 / dvh1.05.01 / dvav...
+     */
+    private boolean isDolbyVision(Format video) {
+        String codecs = video != null && video.codecs != null ? video.codecs.toLowerCase(Locale.US) : null;
+        String mime = video != null && video.sampleMimeType != null ? video.sampleMimeType.toLowerCase(Locale.US) : null;
+
+        return (codecs != null && (codecs.contains("dvhe") || codecs.contains("dvh1") || codecs.contains("dvav") || codecs.contains("dolby")))
+                || (mime != null && mime.contains("dolby"));
     }
 
     private String getClientType() {

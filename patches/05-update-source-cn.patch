@@ -1,0 +1,36 @@
+diff --git a/common/src/stbeta/res/values/update_urls.xml b/common/src/stbeta/res/values/update_urls.xml
+index 0242dc6..cadfdb3 100644
+--- a/common/src/stbeta/res/values/update_urls.xml
++++ b/common/src/stbeta/res/values/update_urls.xml
+@@ -1,6 +1,6 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<resources>
+-    <string-array name="update_urls">
+-        <item>https://github.com/yuliskov/SmartTubeNext/releases/download/latest/smarttube_beta2.json</item>
+-    </string-array>
+-</resources>
+\ No newline at end of file
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string-array name="update_urls">
++        <item>https://github.com/GITHUB_REPOSITORY/releases/latest/download/smarttube_beta2.json</item>
++    </string-array>
++</resources>
+diff --git a/common/src/ststable/res/values/update_urls.xml b/common/src/ststable/res/values/update_urls.xml
+index 80bf351..366e5cf 100644
+--- a/common/src/ststable/res/values/update_urls.xml
++++ b/common/src/ststable/res/values/update_urls.xml
+@@ -1,6 +1,6 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<resources>
+-    <string-array name="update_urls">
+-        <item>https://github.com/yuliskov/SmartTubeNext/releases/download/latest/smarttube_stable2.json</item>
+-    </string-array>
+-</resources>
+\ No newline at end of file
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string-array name="update_urls">
++        <item>https://github.com/GITHUB_REPOSITORY/releases/latest/download/smarttube_stable2.json</item>
++    </string-array>
++</resources>
